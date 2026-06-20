@@ -1,5 +1,6 @@
 import os
 import time
+import threading
 import requests
 from flask import Flask, request, jsonify
 
@@ -16,24 +17,9 @@ def home():
     return jsonify({"status": "ok", "message": "Instagram webhook server is running"})
 
 
-@app.route("/upload-instagram", methods=["POST"])
-def upload_instagram():
-    """
-    Recibe un webhook con:
-    {
-        "video_url": "https://...",  (link público del video, ej: de Google Drive)
-        "caption": "Texto del caption"
-    }
-    Y lo publica en Instagram como Reel.
-    """
+def procesar_instagram(video_url, caption):
+    """Esta función corre en segundo plano, sin que Zapier tenga que esperar."""
     try:
-        data = request.get_json()
-        video_url = data.get("video_url")
-        caption = data.get("caption", "")
-
-        if not video_url:
-            return jsonify({"error": "video_url es requerido"}), 400
-
         # Paso 1: Crear contenedor en Instagram
         container_response = requests.post(
             f"{API_URL}/{INSTAGRAM_USER_ID}/media",
@@ -47,13 +33,15 @@ def upload_instagram():
         container_data = container_response.json()
 
         if "error" in container_data:
-            return jsonify({"error": container_data["error"]["message"]}), 400
+            print(f"Error creando contenedor: {container_data['error']['message']}")
+            return
 
         container_id = container_data["id"]
+        print(f"Contenedor creado: {container_id}")
 
         # Paso 2: Esperar a que Instagram procese el video
         procesado = False
-        for i in range(30):
+        for i in range(60):  # hasta 10 minutos
             status_response = requests.get(
                 f"{API_URL}/{container_id}",
                 params={
@@ -68,12 +56,14 @@ def upload_instagram():
                 procesado = True
                 break
             elif status == "ERROR":
-                return jsonify({"error": f"Error procesando video: {status_data.get('status')}"}), 400
+                print(f"Error procesando video: {status_data.get('status')}")
+                return
 
             time.sleep(10)
 
         if not procesado:
-            return jsonify({"error": "Timeout esperando que Instagram procese el video"}), 400
+            print("Timeout esperando que Instagram procese el video")
+            return
 
         # Paso 3: Publicar
         publish_response = requests.post(
@@ -86,16 +76,40 @@ def upload_instagram():
         publish_data = publish_response.json()
 
         if "error" in publish_data:
-            return jsonify({"error": publish_data["error"]["message"]}), 400
+            print(f"Error publicando: {publish_data['error']['message']}")
+            return
 
-        return jsonify({
-            "success": True,
-            "media_id": publish_data.get("id"),
-            "message": "Video publicado en Instagram exitosamente"
-        })
+        print(f"¡Publicado exitosamente! Media ID: {publish_data.get('id')}")
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        print(f"Error en procesar_instagram: {str(e)}")
+
+
+@app.route("/upload-instagram", methods=["POST"])
+def upload_instagram():
+    """
+    Recibe un webhook con:
+    {
+        "video_url": "https://...",  (link público del video, ej: de Google Drive)
+        "caption": "Texto del caption"
+    }
+    Y lo publica en Instagram como Reel, en segundo plano.
+    """
+    data = request.get_json()
+    video_url = data.get("video_url")
+    caption = data.get("caption", "")
+
+    if not video_url:
+        return jsonify({"error": "video_url es requerido"}), 400
+
+    # Lanzar el procesamiento en un hilo separado, así respondemos rápido
+    thread = threading.Thread(target=procesar_instagram, args=(video_url, caption))
+    thread.start()
+
+    return jsonify({
+        "success": True,
+        "message": "Procesando subida a Instagram en segundo plano. Puede tardar varios minutos."
+    })
 
 
 if __name__ == "__main__":
