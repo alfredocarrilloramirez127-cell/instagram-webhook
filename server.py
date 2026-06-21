@@ -2,6 +2,7 @@ import os
 import time
 import threading
 import requests
+from datetime import datetime, timezone
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
@@ -17,9 +18,24 @@ def home():
     return jsonify({"status": "ok", "message": "Instagram webhook server is running"})
 
 
-def procesar_instagram(video_url, caption):
+def procesar_instagram(video_url, caption, publish_at=None):
     """Esta función corre en segundo plano, sin que Zapier tenga que esperar."""
     try:
+        # Si hay una fecha de publicación programada, esperar hasta esa hora
+        if publish_at:
+            try:
+                hora_objetivo = datetime.fromisoformat(publish_at.replace("Z", "+00:00"))
+                ahora = datetime.now(timezone.utc)
+                segundos_espera = (hora_objetivo - ahora).total_seconds()
+
+                if segundos_espera > 0:
+                    print(f"Esperando {segundos_espera:.0f} segundos para publicar a las {publish_at}")
+                    time.sleep(segundos_espera)
+                else:
+                    print(f"La hora programada ({publish_at}) ya pasó, publicando de inmediato")
+            except Exception as e:
+                print(f"Error procesando publish_at '{publish_at}': {e}. Publicando de inmediato.")
+
         # Paso 1: Crear contenedor en Instagram
         container_response = requests.post(
             f"{API_URL}/{INSTAGRAM_USER_ID}/media",
@@ -91,24 +107,32 @@ def upload_instagram():
     Recibe un webhook con:
     {
         "video_url": "https://...",  (link público del video, ej: de Google Drive)
-        "caption": "Texto del caption"
+        "caption": "Texto del caption",
+        "publish_at": "2026-06-25T19:00:00Z"  (opcional, formato ISO 8601 UTC)
     }
-    Y lo publica en Instagram como Reel, en segundo plano.
+    Y lo publica en Instagram como Reel, en segundo plano (inmediato o programado).
     """
     data = request.get_json()
     video_url = data.get("video_url")
     caption = data.get("caption", "")
+    publish_at = data.get("publish_at")  # puede venir vacío o no venir
 
     if not video_url:
         return jsonify({"error": "video_url es requerido"}), 400
 
     # Lanzar el procesamiento en un hilo separado, así respondemos rápido
-    thread = threading.Thread(target=procesar_instagram, args=(video_url, caption))
+    thread = threading.Thread(target=procesar_instagram, args=(video_url, caption, publish_at))
     thread.start()
+
+    mensaje = "Procesando subida a Instagram en segundo plano."
+    if publish_at:
+        mensaje += f" Programado para: {publish_at}"
+    else:
+        mensaje += " Publicando de inmediato."
 
     return jsonify({
         "success": True,
-        "message": "Procesando subida a Instagram en segundo plano. Puede tardar varios minutos."
+        "message": mensaje
     })
 
 
