@@ -1,0 +1,115 @@
+name: Upload to YouTube
+
+on:
+  workflow_dispatch:
+    inputs:
+      drive_url:
+        description: 'Google Drive download URL'
+        required: true
+      titulo:
+        description: 'Video title'
+        required: true
+      descripcion:
+        description: 'Video description'
+        required: true
+      privacy_status:
+        description: 'Privacy status (public or private)'
+        required: true
+        default: 'public'
+      publish_at:
+        description: 'Scheduled publish time (ISO 8601, optional)'
+        required: false
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install FFmpeg
+        run: sudo apt-get install -y ffmpeg
+
+      - name: Install Python dependencies
+        run: pip install google-auth google-auth-oauthlib google-api-python-client requests
+
+      - name: Download and convert video
+        run: |
+          python3 << 'PYEOF'
+          import os, subprocess, tempfile, requests, time
+          from google.oauth2.credentials import Credentials
+          from google.auth.transport.requests import Request
+          from googleapiclient.discovery import build
+          from googleapiclient.http import MediaFileUpload
+
+          drive_url      = os.environ["DRIVE_URL"]
+          titulo         = os.environ["TITULO"]
+          descripcion    = os.environ["DESCRIPCION"]
+          privacy_status = os.environ["PRIVACY_STATUS"]
+          publish_at     = os.environ.get("PUBLISH_AT", "")
+
+          # Descargar video
+          print("Descargando video...")
+          r = requests.get(drive_url, stream=True, timeout=300)
+          r.raise_for_status()
+          tmp_in = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+          for chunk in r.iter_content(1024*1024):
+              tmp_in.write(chunk)
+          tmp_in.close()
+          print(f"Video descargado: {tmp_in.name}")
+
+          # Convertir a 9:16 vertical con barras negras
+          tmp_out = tmp_in.name.replace(".mp4", "_vertical.mp4")
+          filtro = "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black"
+          cmd = ["ffmpeg", "-y", "-i", tmp_in.name, "-vf", filtro, "-c:v", "libx264", "-c:a", "aac", "-movflags", "+faststart", tmp_out]
+          result = subprocess.run(cmd, capture_output=True, text=True)
+          if result.returncode != 0:
+              print(f"FFmpeg error: {result.stderr}")
+              exit(1)
+          print("Video convertido a 9:16")
+
+          # Autenticar con YouTube
+          creds = Credentials(
+              token=None,
+              refresh_token=os.environ["YT_REFRESH_TOKEN"],
+              client_id=os.environ["YT_CLIENT_ID"],
+              client_secret=os.environ["YT_CLIENT_SECRET"],
+              token_uri="https://oauth2.googleapis.com/token",
+              scopes=["https://www.googleapis.com/auth/youtube.upload"]
+          )
+          creds.refresh(Request())
+          youtube = build("youtube", "v3", credentials=creds)
+
+          # Subir a YouTube
+          body = {
+              "snippet": {
+                  "title": titulo[:100],
+                  "description": descripcion,
+                  "categoryId": "22",
+                  "tags": ["Shorts"]
+              },
+              "status": {
+                  "privacyStatus": privacy_status,
+                  "selfDeclaredMadeForKids": False
+              }
+          }
+          if publish_at and privacy_status == "private":
+              body["status"]["publishAt"] = publish_at
+
+          print("Subiendo a YouTube...")
+          media = MediaFileUpload(tmp_out, chunksize=1024*1024, resumable=True)
+          req = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
+          response = None
+          while response is None:
+              _, response = req.next_chunk()
+              print(".", end="", flush=True)
+
+          print(f"\nPublicado! ID: {response['id']}")
+          print(f"URL: https://youtube.com/shorts/{response['id']}")
+          PYEOF
+        env:
+          DRIVE_URL: ${{ github.event.inputs.drive_url }}
+          TITULO: ${{ github.event.inputs.titulo }}
+          DESCRIPCION: ${{ github.event.inputs.descripcion }}
+          PRIVACY_STATUS: ${{ github.event.inputs.privacy_status }}
+          PUBLISH_AT: ${{ github.event.inputs.publish_at }}
+          YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
+          YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+          YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
