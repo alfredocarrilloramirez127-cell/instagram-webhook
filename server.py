@@ -19,6 +19,11 @@ INSTAGRAM_USER_ID = os.environ.get("INSTAGRAM_USER_ID")
 INSTAGRAM_TOKEN   = os.environ.get("INSTAGRAM_ACCESS_TOKEN")
 IG_API            = "https://graph.instagram.com/v21.0"
 
+# ─── Configuración Facebook ───────────────────────────────────────────────
+FB_PAGE_ID    = os.environ.get("FB_PAGE_ID")
+FB_PAGE_TOKEN = os.environ.get("FB_PAGE_TOKEN")
+FB_API        = "https://graph.facebook.com/v21.0"
+
 # ─── Configuración YouTube ────────────────────────────────────────────────
 YT_CLIENT_ID      = os.environ.get("YT_CLIENT_ID")
 YT_CLIENT_SECRET  = os.environ.get("YT_CLIENT_SECRET")
@@ -62,14 +67,12 @@ def convertir_a_vertical(input_path):
     Devuelve la ruta del archivo convertido.
     """
     output_path = input_path.replace(".mp4", "_vertical.mp4")
-    
-    # Filtro: escala el video para que quepa en 1080x1920 manteniendo proporción,
-    # luego agrega barras negras donde haga falta (pad)
+
     filtro = (
         "scale=1080:1920:force_original_aspect_ratio=decrease,"
         "pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black"
     )
-    
+
     cmd = [
         "ffmpeg", "-y",
         "-i", input_path,
@@ -79,11 +82,11 @@ def convertir_a_vertical(input_path):
         "-movflags", "+faststart",
         output_path
     ]
-    
+
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         raise Exception(f"FFmpeg error: {result.stderr}")
-    
+
     return output_path
 
 def get_youtube_service():
@@ -98,6 +101,77 @@ def get_youtube_service():
     )
     creds.refresh(Request())
     return build("youtube", "v3", credentials=creds)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# FACEBOOK
+# ════════════════════════════════════════════════════════════════════════════
+
+def publicar_en_facebook(video_url, caption):
+    """Publica un Reel en la página de Facebook."""
+    try:
+        if not FB_PAGE_ID or not FB_PAGE_TOKEN:
+            print("[Facebook] No configurado, se omite.")
+            return False
+
+        # Paso 1: Iniciar subida
+        start_response = requests.post(
+            f"{FB_API}/{FB_PAGE_ID}/video_reels",
+            data={
+                "upload_phase": "start",
+                "access_token": FB_PAGE_TOKEN
+            }
+        )
+        start_data = start_response.json()
+        if "error" in start_data:
+            print(f"[Facebook] Error iniciando: {start_data['error']['message']}")
+            return False
+
+        video_id = start_data.get("video_id")
+        upload_url = start_data.get("upload_url")
+
+        # Paso 2: Descargar el video y subirlo
+        video_bytes = requests.get(video_url, timeout=300).content
+
+        upload_response = requests.post(
+            upload_url,
+            headers={
+                "Authorization": f"OAuth {FB_PAGE_TOKEN}",
+                "offset": "0",
+                "file_size": str(len(video_bytes))
+            },
+            data=video_bytes
+        )
+
+        if upload_response.status_code not in [200, 201]:
+            print(f"[Facebook] Error subiendo video: {upload_response.text}")
+            return False
+
+        # Paso 3: Esperar que procese
+        time.sleep(15)
+
+        # Paso 4: Publicar
+        finish_response = requests.post(
+            f"{FB_API}/{FB_PAGE_ID}/video_reels",
+            data={
+                "video_id": video_id,
+                "upload_phase": "finish",
+                "video_state": "PUBLISHED",
+                "description": caption,
+                "access_token": FB_PAGE_TOKEN
+            }
+        )
+        finish_data = finish_response.json()
+        if "error" in finish_data:
+            print(f"[Facebook] Error publicando: {finish_data['error']['message']}")
+            return False
+
+        print(f"[Facebook] ¡Publicado exitosamente!")
+        return True
+
+    except Exception as e:
+        print(f"[Facebook] Error: {e}")
+        return False
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -145,6 +219,9 @@ def publicar_en_instagram(video_url, caption):
 
         if "error" in pub:
             return False, pub["error"]["message"]
+
+        # Publicar también en Facebook (en paralelo, no bloquea)
+        threading.Thread(target=publicar_en_facebook, args=(video_url, caption)).start()
 
         return True, f"Publicado. ID: {pub.get('id')}"
     except Exception as e:
